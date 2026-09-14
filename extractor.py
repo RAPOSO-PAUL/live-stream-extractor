@@ -10,74 +10,72 @@ from playwright.sync_api import sync_playwright
 # CONFIGURAÇÃO
 # ============================================================
 
+if len(sys.argv) < 2:
+    print("Uso:")
+    print("python extractor.py https://exemplo.com/canal")
+    sys.exit(1)
+
 SOURCE_URL = sys.argv[1]
 
 results = {}
 
-
-# Extensões que queremos procurar
-MEDIA_EXTENSIONS = (
-    ".m3u8",
-    ".m3u",
-    ".mpd",
-    ".mp4",
-    ".ts",
-)
-
-# MIME types conhecidos
-HLS_TYPES = (
-    "application/vnd.apple.mpegurl",
-    "application/x-mpegurl",
-    "audio/mpegurl",
-    "audio/x-mpegurl",
-)
-
-DASH_TYPES = (
-    "application/dash+xml",
-)
+NETWORK_LOG = "network.log"
 
 
 # ============================================================
-# UTILIDADES
+# LOG
 # ============================================================
 
-def valid_http_url(url):
-    try:
-        parsed = urlparse(url)
+def log(message):
+    print(message, flush=True)
 
-        return parsed.scheme in (
-            "http",
-            "https",
-        )
+    with open(
+        NETWORK_LOG,
+        "a",
+        encoding="utf-8"
+    ) as f:
+        f.write(message + "\n")
 
-    except Exception:
-        return False
 
+# ============================================================
+# URL
+# ============================================================
 
 def normalize_url(url, base_url=None):
 
     if not url:
         return None
 
-    url = url.strip()
+    url = str(url).strip()
 
-    # Remove aspas acidentais
     url = url.strip("\"'")
 
-    # Converte URL relativa em absoluta
     if base_url:
         url = urljoin(
             base_url,
             url
         )
 
-    if not valid_http_url(url):
+    try:
+        parsed = urlparse(url)
+
+        if parsed.scheme not in (
+            "http",
+            "https"
+        ):
+            return None
+
+        return url
+
+    except Exception:
         return None
 
-    return url
 
+# ============================================================
+# CLASSIFICAÇÃO
+# ============================================================
 
-def classify_stream(url, content_type=""):
+def classify(url, content_type=""):
 
     value = (
         url + " " + content_type
@@ -105,13 +103,17 @@ def classify_stream(url, content_type=""):
         return "mpeg-ts"
 
     if (
-        url.lower().endswith("/file.txt")
-        or "file.txt?" in url.lower()
+        "/file.txt" in value
+        or value.endswith("file.txt")
     ):
-        return "hls-file-txt"
+        return "file-txt"
 
     return "other"
 
+
+# ============================================================
+# SALVAR STREAM
+# ============================================================
 
 def add_stream(
     url,
@@ -126,53 +128,63 @@ def add_stream(
         return
 
     if not stream_type:
-        stream_type = classify_stream(
+        stream_type = classify(
             url,
             content_type
         )
 
-    results[url] = {
-        "url": url,
-        "type": stream_type,
-        "content_type": content_type,
-        "source": source,
-        "host": urlparse(url).netloc,
-    }
+    if url not in results:
+
+        results[url] = {
+            "url": url,
+            "type": stream_type,
+            "content_type": content_type,
+            "source": source,
+            "host": urlparse(url).netloc
+        }
+
+        log(
+            f"[STREAM] [{stream_type}] {url}"
+        )
 
 
 # ============================================================
-# DETECÇÃO DE PLAYLIST
+# PLAYLIST HLS
 # ============================================================
 
-def is_hls_playlist(text):
+def is_hls(text):
 
     if not text:
         return False
 
-    sample = text[:100000]
+    text = text[:100000]
 
     return (
-        "#EXTM3U" in sample
-        or "#EXT-X-" in sample
-    )
-
-
-def is_dash_manifest(text):
-
-    if not text:
-        return False
-
-    sample = text[:100000].lower()
-
-    return (
-        "<mpd" in sample
-        or "<mpd " in sample
-        or "urn:mpeg:dash" in sample
+        "#EXTM3U" in text
+        or "#EXT-X-" in text
     )
 
 
 # ============================================================
-# EXTRAÇÃO DE URLS
+# DASH
+# ============================================================
+
+def is_dash(text):
+
+    if not text:
+        return False
+
+    text = text[:100000].lower()
+
+    return (
+        "<mpd" in text
+        or "<mpd " in text
+        or "urn:mpeg:dash" in text
+    )
+
+
+# ============================================================
+# EXTRAIR URLS
 # ============================================================
 
 def extract_urls(text):
@@ -191,7 +203,7 @@ def extract_urls(text):
         # DASH
         r'https?://[^"\'<>\s]+\.mpd(?:\?[^"\'<>\s]*)?',
 
-        # FILE.TXT
+        # file.txt
         r'https?://[^"\'<>\s]+/file\.txt(?:\?[^"\'<>\s]*)?',
 
         # MP4
@@ -205,13 +217,11 @@ def extract_urls(text):
 
     for pattern in patterns:
 
-        matches = re.findall(
+        for match in re.findall(
             pattern,
             text,
             re.IGNORECASE
-        )
-
-        for match in matches:
+        ):
 
             url = normalize_url(match)
 
@@ -222,7 +232,7 @@ def extract_urls(text):
 
 
 # ============================================================
-# ANALISAR RESPOSTA HTTP
+# ANALISAR RESPOSTA
 # ============================================================
 
 def inspect_response(
@@ -244,13 +254,15 @@ def inspect_response(
         content_type or ""
     ).lower()
 
+
     # --------------------------------------------------------
-    # HLS pelo Content-Type
+    # HLS MIME
     # --------------------------------------------------------
 
-    if any(
-        mime in lower_type
-        for mime in HLS_TYPES
+    if (
+        "mpegurl" in lower_type
+        or "application/vnd.apple.mpegurl"
+        in lower_type
     ):
 
         add_stream(
@@ -260,16 +272,12 @@ def inspect_response(
             "network"
         )
 
-        return
 
     # --------------------------------------------------------
-    # DASH pelo Content-Type
+    # DASH MIME
     # --------------------------------------------------------
 
-    if any(
-        mime in lower_type
-        for mime in DASH_TYPES
-    ):
+    if "dash+xml" in lower_type:
 
         add_stream(
             url,
@@ -278,7 +286,6 @@ def inspect_response(
             "network"
         )
 
-        return
 
     # --------------------------------------------------------
     # M3U8
@@ -293,7 +300,6 @@ def inspect_response(
             "network"
         )
 
-        return
 
     # --------------------------------------------------------
     # MPD
@@ -308,7 +314,6 @@ def inspect_response(
             "network"
         )
 
-        return
 
     # --------------------------------------------------------
     # FILE.TXT
@@ -316,10 +321,10 @@ def inspect_response(
 
     if (
         lower_url.endswith("/file.txt")
-        or "file.txt?" in lower_url
+        or "/file.txt?" in lower_url
     ):
 
-        if body and is_hls_playlist(body):
+        if body and is_hls(body):
 
             add_stream(
                 url,
@@ -328,15 +333,20 @@ def inspect_response(
                 "network"
             )
 
-        return
+        else:
+
+            log(
+                f"[TXT] {url}"
+            )
+
 
     # --------------------------------------------------------
-    # Detectar playlist pelo conteúdo
+    # Playlist pelo conteúdo
     # --------------------------------------------------------
 
     if body:
 
-        if is_hls_playlist(body):
+        if is_hls(body):
 
             add_stream(
                 url,
@@ -345,7 +355,7 @@ def inspect_response(
                 "content"
             )
 
-        elif is_dash_manifest(body):
+        elif is_dash(body):
 
             add_stream(
                 url,
@@ -355,33 +365,13 @@ def inspect_response(
             )
 
 
-# ============================================================
-# EXTRAIR PLAYLISTS DENTRO DE UMA RESPOSTA
-# ============================================================
-
-def inspect_body(
-    body,
-    base_url
-):
-
-    if not body:
-        return
-
-    for found in extract_urls(body):
-
-        absolute = normalize_url(
-            found,
-            base_url
-        )
-
-        if absolute:
+        # URLs dentro da resposta
+        for found in extract_urls(body):
 
             add_stream(
-                absolute,
+                found,
                 "",
-                classify_stream(
-                    absolute
-                ),
+                classify(found),
                 "embedded"
             )
 
@@ -392,19 +382,29 @@ def inspect_body(
 
 def main():
 
-    print(
-        "=========================================="
-    )
-    print(
-        "       LIVE STREAM EXTRACTOR"
-    )
-    print(
+    # Limpa log anterior
+    open(
+        NETWORK_LOG,
+        "w",
+        encoding="utf-8"
+    ).close()
+
+    log(
         "=========================================="
     )
 
-    print(
+    log(
+        "       LIVE STREAM EXTRACTOR"
+    )
+
+    log(
+        "=========================================="
+    )
+
+    log(
         f"[+] URL: {SOURCE_URL}"
     )
+
 
     with sync_playwright() as p:
 
@@ -425,14 +425,63 @@ def main():
             viewport={
                 "width": 1920,
                 "height": 1080
-            }
+            },
+
+            ignore_https_errors=True
         )
+
 
         page = context.new_page()
 
 
         # ====================================================
-        # NETWORK RESPONSE
+        # REQUEST
+        # ====================================================
+
+        def on_request(request):
+
+            try:
+
+                url = request.url
+
+                lower = url.lower()
+
+                # Loga somente URLs potencialmente relevantes
+                if (
+                    ".m3u8" in lower
+                    or ".m3u" in lower
+                    or ".mpd" in lower
+                    or "file.txt" in lower
+                    or "manifest" in lower
+                    or "playlist" in lower
+                ):
+
+                    log(
+                        f"[REQUEST] {url}"
+                    )
+
+                    add_stream(
+                        url,
+                        "",
+                        classify(url),
+                        "request"
+                    )
+
+            except Exception as error:
+
+                log(
+                    f"[REQUEST ERROR] {error}"
+                )
+
+
+        page.on(
+            "request",
+            on_request
+        )
+
+
+        # ====================================================
+        # RESPONSE
         # ====================================================
 
         def on_response(response):
@@ -450,34 +499,62 @@ def main():
                     )
                 )
 
-                body = None
+                lower_url = url.lower()
 
-                # Não baixar corpos grandes
-                # desnecessariamente.
-                should_read = (
-
-                    "text" in content_type.lower()
-
-                    or "json" in content_type.lower()
-
-                    or "mpegurl"
-                    in content_type.lower()
-
-                    or ".txt" in url.lower()
-
-                    or ".m3u" in url.lower()
-
-                    or ".mpd" in url.lower()
+                lower_type = (
+                    content_type.lower()
                 )
 
-                if should_read:
+
+                interesting = (
+
+                    ".m3u8" in lower_url
+
+                    or ".mpd" in lower_url
+
+                    or ".m3u" in lower_url
+
+                    or "file.txt"
+                    in lower_url
+
+                    or "mpegurl"
+                    in lower_type
+
+                    or "dash+xml"
+                    in lower_type
+
+                    or "manifest"
+                    in lower_url
+
+                    or "playlist"
+                    in lower_url
+
+                    or "json"
+                    in lower_type
+                )
+
+
+                if interesting:
+
+                    log(
+                        f"[RESPONSE] "
+                        f"{response.status} "
+                        f"{content_type} "
+                        f"{url}"
+                    )
+
+
+                body = None
+
+
+                # Ler somente respostas textuais
+                if interesting:
 
                     try:
 
                         body = response.text()
 
                     except Exception:
-
                         body = None
 
 
@@ -488,18 +565,10 @@ def main():
                 )
 
 
-                if body:
-
-                    inspect_body(
-                        body,
-                        url
-                    )
-
-
             except Exception as error:
 
-                print(
-                    f"[!] Erro response: {error}"
+                log(
+                    f"[RESPONSE ERROR] {error}"
                 )
 
 
@@ -510,44 +579,12 @@ def main():
 
 
         # ====================================================
-        # NETWORK REQUEST
-        # ====================================================
-
-        def on_request(request):
-
-            try:
-
-                url = request.url
-
-                lower = url.lower()
-
-                if (
-                    ".m3u8" in lower
-                    or ".m3u" in lower
-                    or ".mpd" in lower
-                    or "/file.txt" in lower
-                ):
-
-                    add_stream(
-                        url,
-                        "",
-                        classify_stream(url),
-                        "request"
-                    )
-
-            except Exception:
-                pass
-
-
-        page.on(
-            "request",
-            on_request
-        )
-
-
-        # ====================================================
         # ABRIR PÁGINA
         # ====================================================
+
+        log(
+            "[+] Abrindo página..."
+        )
 
         try:
 
@@ -557,54 +594,149 @@ def main():
                 timeout=60000
             )
 
+            log(
+                f"[+] Página carregada: {page.url}"
+            )
+
         except Exception as error:
 
-            print(
-                f"[!] Falha ao abrir página: {error}"
+            log(
+                f"[!] Erro ao abrir página: {error}"
             )
 
 
         # ====================================================
-        # AGUARDAR PLAYER / JAVASCRIPT
+        # PRIMEIRA ESPERA
         # ====================================================
 
-        print(
+        log(
             "[+] Aguardando carregamento do player..."
         )
 
         page.wait_for_timeout(
-            15000
+            10000
         )
 
 
         # ====================================================
-        # HTML FINAL
+        # TENTAR DAR PLAY EM ELEMENTOS HTML5
+        # ====================================================
+
+        try:
+
+            videos = page.locator(
+                "video"
+            )
+
+            count = videos.count()
+
+            log(
+                f"[+] Elementos video encontrados: {count}"
+            )
+
+            for i in range(count):
+
+                try:
+
+                    videos.nth(i).scroll_into_view_if_needed()
+
+                    videos.nth(i).evaluate(
+                        """
+                        video => {
+                            video.muted = true;
+                            video.play().catch(() => {});
+                        }
+                        """
+                    )
+
+                except Exception:
+                    pass
+
+        except Exception as error:
+
+            log(
+                f"[!] Erro ao iniciar vídeo: {error}"
+            )
+
+
+        # ====================================================
+        # SEGUNDA ESPERA
+        # ====================================================
+
+        log(
+            "[+] Aguardando requisições do player..."
+        )
+
+        page.wait_for_timeout(
+            30000
+        )
+
+
+        # ====================================================
+        # SALVAR SCREENSHOT
+        # ====================================================
+
+        try:
+
+            page.screenshot(
+                path="player.png",
+                full_page=True
+            )
+
+            log(
+                "[+] Screenshot salvo."
+            )
+
+        except Exception as error:
+
+            log(
+                f"[!] Screenshot falhou: {error}"
+            )
+
+
+        # ====================================================
+        # SALVAR HTML
         # ====================================================
 
         try:
 
             html = page.content()
 
-            for url in extract_urls(
+            with open(
+                "page.html",
+                "w",
+                encoding="utf-8"
+            ) as f:
+
+                f.write(html)
+
+            log(
+                "[+] HTML salvo."
+            )
+
+
+            # Procurar URLs no HTML
+
+            for found in extract_urls(
                 html
             ):
 
                 add_stream(
-                    url,
+                    found,
                     "",
-                    classify_stream(url),
+                    classify(found),
                     "html"
                 )
 
         except Exception as error:
 
-            print(
-                f"[!] Erro HTML: {error}"
+            log(
+                f"[!] Erro salvando HTML: {error}"
             )
 
 
         # ====================================================
-        # ELEMENTOS VIDEO/AUDIO
+        # ELEMENTOS DE MÍDIA
         # ====================================================
 
         try:
@@ -613,13 +745,19 @@ def main():
                 "video, audio, source"
             ).all()
 
+            log(
+                f"[+] Elementos de mídia: {len(elements)}"
+            )
+
             for element in elements:
 
                 for attribute in (
                     "src",
                     "data-src",
                     "data-url",
-                    "data-file"
+                    "data-file",
+                    "data-video",
+                    "data-stream"
                 ):
 
                     try:
@@ -642,7 +780,7 @@ def main():
                                 add_stream(
                                     absolute,
                                     "",
-                                    classify_stream(
+                                    classify(
                                         absolute
                                     ),
                                     "media-element"
@@ -651,15 +789,18 @@ def main():
                     except Exception:
                         pass
 
-        except Exception:
-            pass
+        except Exception as error:
+
+            log(
+                f"[!] Erro nos elementos de mídia: {error}"
+            )
 
 
         browser.close()
 
 
     # ========================================================
-    # RESULTADO
+    # RESULTADO FINAL
     # ========================================================
 
     output = {
@@ -678,31 +819,33 @@ def main():
         "streams.json",
         "w",
         encoding="utf-8"
-    ) as file:
+    ) as f:
 
         json.dump(
             output,
-            file,
+            f,
             indent=2,
             ensure_ascii=False
         )
 
 
-    print()
-    print(
+    log("")
+    log(
         "=========================================="
     )
-    print(
-        f"Streams encontrados: {len(results)}"
+
+    log(
+        f"STREAMS ENCONTRADOS: {len(results)}"
     )
-    print(
+
+    log(
         "=========================================="
     )
 
 
     for stream in results.values():
 
-        print(
+        log(
             f"[{stream['type']}] "
             f"{stream['url']}"
         )
